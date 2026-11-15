@@ -62,6 +62,18 @@ Install it: on iPhone/iPad, Chrome → Share → **Add to Home Screen**. On Mac,
   confirmation, the chip at the top right says "Sign in to sync" – one tap.
 - Google shows an "unverified app" notice the first time, because the OAuth client is your own. That is expected.
 
+## Adding records in bulk with Excel
+
+Settings → **Add or edit records in Excel**:
+
+- **Download template** – an empty Records sheet, your category names, and a How to use sheet.
+- **Download all records** (or, on the Records screen, **Download these in Excel** for the current filter) – every row carries its ID.
+- **Import from Excel** – shows a summary first (new, updated, deleted, skipped, problems), then saves and syncs to Drive.
+
+Rules: rows without an ID are new; rows with an ID update that record; type `yes` in Delete to remove one.
+Importing the same file twice does not create duplicates. Unknown category names can be added during import.
+The Excel library loads from cdnjs.cloudflare.com the first time, so that first use needs internet.
+
 ## Changing the app later
 
 Edit the files, upload them, and bump `VERSION` in `sw.js`.

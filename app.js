@@ -31,7 +31,7 @@
     dashYear: 'current', dashPeriod: 'current', show: { Income: true, Expenses: true, Savings: true, rem: true },
     planYear: null, txMonth: 'latest', txType: '', txCat: '', txQ: ''
   }, readJSON(K.ui, {}));
-  var route = 'dashboard', txLimit = 200, changeSeq = 0, pendingRender = false;
+  var lastList = [], route = 'dashboard', txLimit = 200, changeSeq = 0, pendingRender = false;
 
   function saveData() { writeJSON(K.data, data); }
   function saveMeta() { writeJSON(K.meta, meta); }
@@ -349,6 +349,7 @@
       return true;
     }).sort(function (a, b) { return a.d < b.d ? 1 : a.d > b.d ? -1 : (b.t || 0) - (a.t || 0) || (a.id < b.id ? 1 : -1); });
 
+    lastList = list;
     var sums = { Income: 0, Expenses: 0, Savings: 0 };
     list.forEach(function (x) { sums[x.ty] += x.a; });
 
@@ -371,7 +372,8 @@
     if (!list.length) return '<div class="empty"><p>No records match these filters.</p><button class="btn" data-action="clear-filters">Clear filters</button></div>';
     var out = '<div class="tx-sum"><span>' + nf0.format(list.length) + (list.length === 1 ? ' record' : ' records') + '</span>' +
       TYPES.map(function (ty) { return '<span class="t-' + ty + '">' + ty + ' <b>' + money(sums[ty]) + '</b></span>'; }).join('') +
-      '<span>Net <b class="' + (sums.Income - sums.Expenses - sums.Savings < 0 ? 'neg' : '') + '">' + money(sums.Income - sums.Expenses - sums.Savings) + '</b></span></div>';
+      '<span>Net <b class="' + (sums.Income - sums.Expenses - sums.Savings < 0 ? 'neg' : '') + '">' + money(sums.Income - sums.Expenses - sums.Savings) + '</b></span>' +
+      '<button class="btn small" data-action="xl-export-view">Download these in Excel</button></div>';
     var shown = list.slice(0, txLimit), day = null;
     shown.forEach(function (x) {
       if (x.d !== day) {
@@ -481,6 +483,8 @@
     var dataPanel = '<section class="panel"><h2>Your data</h2>' +
       '<div class="form-row"><div class="lab"><b>Import a budget file</b><small>Merges a budget-data.json or an earlier backup into what is already here. Nothing is duplicated.</small></div><button class="btn" data-action="import">Import file</button></div>' +
       '<div class="form-row"><div class="lab"><b>Download a backup</b><small>Everything in one file you can import again later.</small></div><button class="btn" data-action="export-json">Download backup</button></div>' +
+      '<div class="form-row"><div class="lab"><b>Add or edit records in Excel</b><small>1. Download the template, or all your records. 2. Add or change rows in Excel or Numbers. 3. Import it here – you see a summary first, then it syncs to Drive.</small></div>' +
+      '<div class="row"><button class="btn" data-action="xl-template">Download template</button><button class="btn" data-action="xl-export">Download all records</button><button class="btn primary" data-action="xl-import">Import from Excel</button></div></div>' +
       '<div class="form-row"><div class="lab"><b>Download records as CSV</b><small>Date, type, category, amount, details and running balance – opens in Excel.</small></div><button class="btn" data-action="export-csv">Download CSV</button></div>' +
       '<div class="form-row"><div class="lab"><b>Erase this device</b><small>Removes the copy stored in this browser. The file in Google Drive is not touched.</small></div><button class="btn danger-text" data-action="erase">Erase this device</button></div></section>';
     return '<div class="stack">' + sync + general + cats + dataPanel + '</div>';
@@ -566,6 +570,285 @@
     var now = Date.now(), names = { Income: ['Salary', 'Other sources'], Expenses: ['Food', 'Fuel', 'Household', 'Mobile', 'Internet', 'Misc'], Savings: ['Index fund', 'Fixed deposit', 'Cash in bank'] };
     TYPES.forEach(function (ty) { names[ty].forEach(function (n, i) { catList(ty).push({ id: Core.newId(), name: n, o: i, t: now }); }); });
     data.settings.t = now; commit();
+  }
+
+
+  /* ───────────── Excel bulk upload ─────────────
+     Columns: Date | Type | Category | Amount | Details | ID | Delete
+     • Rows with an ID update that record (or delete it when Delete says yes).
+     • Rows without an ID are new; each gets an ID built from its contents, so
+       importing the same file twice never creates duplicates. */
+  var XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+  var COLS = ['Date', 'Type', 'Category', 'Amount', 'Details', 'ID', 'Delete'];
+  function loadXlsx() {
+    if (window.XLSX) return Promise.resolve(window.XLSX);
+    if (loadXlsx._p) return loadXlsx._p;
+    loadXlsx._p = new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = XLSX_URL; s.async = true; s.crossOrigin = 'anonymous';
+      s.onload = function () { window.XLSX ? resolve(window.XLSX) : reject(new Error('load')); };
+      s.onerror = function () { loadXlsx._p = null; reject(new Error('load')); };
+      document.head.appendChild(s);
+    });
+    return loadXlsx._p;
+  }
+  function withXlsx(fn) {
+    loadXlsx().then(fn).catch(function (e) {
+      if (e && e.message === 'load') toast('Excel support needs an internet connection the first time. Try again when online.');
+      else { console.error(e); toast('Something went wrong with the Excel file'); }
+    });
+  }
+  var EXCEL_EPOCH = Date.UTC(1899, 11, 30);
+  function isoToSerial(iso) { var p = iso.split('-').map(Number); return (Date.UTC(p[0], p[1] - 1, p[2]) - EXCEL_EPOCH) / 86400000; }
+  function serialToIso(n) {
+    var d = new Date(EXCEL_EPOCH + Math.round(n) * 86400000);
+    return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+  }
+  var MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12 };
+  function validIso(y, m, d) {
+    if (y < 100) y += 2000;
+    if (!(m >= 1 && m <= 12 && d >= 1 && d <= new Date(y, m, 0).getDate() && y >= 1990 && y <= 2100)) return null;
+    return y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  }
+  /* Accepts Excel dates, 2026-02-07, 07/02/2026, 7-2-26, 7 Feb 2026, 07-Feb-2026 (day first). */
+  function parseDate(v) {
+    if (typeof v === 'number' && v > 20000 && v < 80000) return serialToIso(v);
+    var s = String(v == null ? '' : v).trim(), m;
+    if (!s) return null;
+    if ((m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/))) return validIso(+m[1], +m[2], +m[3]);
+    if ((m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})$/))) return validIso(+m[3], +m[2], +m[1]);
+    if ((m = s.match(/^(\d{1,2})[\s\-/.]+([A-Za-z]{3,9})[\s\-/.,]+(\d{2}|\d{4})$/))) {
+      var mo = MON[m[2].slice(0, 4).toLowerCase()] || MON[m[2].slice(0, 3).toLowerCase()];
+      if (mo) return validIso(+m[3], mo, +m[1]);
+    }
+    return null;
+  }
+  function parseType(v) {
+    var s = String(v || '').trim().toLowerCase();
+    if (/^income/.test(s)) return 'Income';
+    if (/^expense/.test(s)) return 'Expenses';
+    if (/^saving/.test(s)) return 'Savings';
+    return null;
+  }
+  function yes(v) { return /^(y|yes|true|x|delete|1)$/i.test(String(v == null ? '' : v).trim()); }
+  function hashId(str) {
+    var h1 = 0x811c9dc5, h2 = 5381;
+    for (var i = 0; i < str.length; i++) {
+      var c = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
+      h2 = (Math.imul(h2, 33) + c) >>> 0;
+    }
+    return 'xl' + h1.toString(36) + h2.toString(36);
+  }
+
+  function sheetFromRows(X, header, rows, dateCols, widths) {
+    var ws = X.utils.aoa_to_sheet([header].concat(rows));
+    rows.forEach(function (r, i) {
+      dateCols.forEach(function (c) {
+        var iso = r[c];
+        if (iso && /^\d{4}-\d{2}-\d{2}$/.test(iso)) ws[X.utils.encode_cell({ r: i + 1, c: c })] = { t: 'n', v: isoToSerial(iso), z: 'dd-mmm-yyyy' };
+      });
+    });
+    ws['!cols'] = widths.map(function (w) { return { wch: w }; });
+    ws['!autofilter'] = { ref: X.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(rows.length, 1), c: header.length - 1 } }) };
+    return ws;
+  }
+  function helperSheets(X, wb) {
+    var max = Math.max.apply(null, TYPES.map(function (t) { return Core.liveCats(data, t).length; }));
+    var cats = [];
+    for (var i = 0; i < max; i++) cats.push(TYPES.map(function (t) { var c = Core.liveCats(data, t)[i]; return c ? c.name : ''; }));
+    var cs = X.utils.aoa_to_sheet([TYPES].concat(cats));
+    cs['!cols'] = [{ wch: 28 }, { wch: 34 }, { wch: 28 }];
+    var help = [
+      ['How to use this file'],
+      [''],
+      ['1. Fill one row per record on the Records sheet. Keep the header row as it is.'],
+      ['2. Date: an Excel date, or text like 07/02/2026 or 7 Feb 2026 (day first).'],
+      ['3. Type: Income, Expenses or Savings.'],
+      ['4. Category: copy a name from the Categories sheet. New names can be added during import.'],
+      ['5. Amount: a number. Sums like 5514+3308 also work.'],
+      ['6. Details: optional note.'],
+      ['7. ID: leave empty for new records. Rows exported from the app already have one – keep it, and your edits update that record.'],
+      ['8. Delete: type yes to remove a record that has an ID.'],
+      [''],
+      ['Then open the app → Settings → Import from Excel, and choose this file.'],
+      ['You will see a summary before anything is saved. Importing the same file again does not create duplicates.'],
+      [''],
+      ['Example rows (do not paste these into Records unless they are real):'],
+      COLS
+    ];
+    var ex = [[today(), 'Expenses', 'Food', 450, 'Lunch'], [today(), 'Expenses', 'Fuel', '1000+346.47', 'Petrol'], [today(), 'Income', 'Salary', 112047, '']];
+    var hs = X.utils.aoa_to_sheet(help.concat(ex.map(function (r) { return [fmtDate(r[0])].concat(r.slice(1)); })));
+    hs['!cols'] = [{ wch: 16 }, { wch: 12 }, { wch: 22 }, { wch: 14 }, { wch: 30 }];
+    X.utils.book_append_sheet(wb, cs, 'Categories');
+    X.utils.book_append_sheet(wb, hs, 'How to use');
+  }
+  function writeBook(X, wb, name) {
+    var out = X.write(wb, { bookType: 'xlsx', type: 'array' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    a.download = name; document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  }
+  function downloadTemplate() {
+    withXlsx(function (X) {
+      var wb = X.utils.book_new();
+      X.utils.book_append_sheet(wb, sheetFromRows(X, COLS, [], [0], [14, 11, 28, 13, 34, 20, 8]), 'Records');
+      helperSheets(X, wb);
+      writeBook(X, wb, 'budget-upload-template.xlsx');
+      toast('Template downloaded');
+    });
+  }
+  function exportExcel(list, label) {
+    withXlsx(function (X) {
+      var idx = Core.catIndex(data);
+      var rows = list.slice().sort(function (a, b) { return a.d < b.d ? -1 : a.d > b.d ? 1 : 0; }).map(function (x) {
+        return [x.d, x.ty, idx[x.c] ? idx[x.c].name : '', x.a, x.n || '', x.id, ''];
+      });
+      var wb = X.utils.book_new();
+      X.utils.book_append_sheet(wb, sheetFromRows(X, COLS, rows, [0], [14, 11, 28, 13, 34, 20, 8]), 'Records');
+      helperSheets(X, wb);
+      writeBook(X, wb, 'budget-records-' + (label || today()) + '.xlsx');
+      toast(nf0.format(rows.length) + ' records downloaded');
+    });
+  }
+
+  var pendingImport = null;
+  function readExcel(file) {
+    withXlsx(function (X) {
+      var r = new FileReader();
+      r.onload = function () {
+        var wb;
+        try { wb = X.read(new Uint8Array(r.result), { type: 'array' }); }
+        catch (e) { toast('That file could not be opened. Use an .xlsx or .csv file.'); return; }
+        var plan = planImport(X, wb);
+        if (plan.error) { toast(plan.error); return; }
+        plan.fileName = file.name;
+        pendingImport = plan;
+        showImportPreview();
+      };
+      r.readAsArrayBuffer(file);
+    });
+  }
+  function findTable(X, wb) {
+    var names = wb.SheetNames.slice().sort(function (a, b) { return (b.toLowerCase() === 'records') - (a.toLowerCase() === 'records'); });
+    for (var i = 0; i < names.length; i++) {
+      var rows = X.utils.sheet_to_json(wb.Sheets[names[i]], { header: 1, raw: true, defval: '' });
+      for (var h = 0; h < Math.min(rows.length, 10); h++) {
+        var head = rows[h].map(function (v) { return String(v).trim().toLowerCase(); });
+        var col = {};
+        COLS.forEach(function (c) { col[c] = head.indexOf(c.toLowerCase()); });
+        if (col.Details < 0) col.Details = head.indexOf('note') >= 0 ? head.indexOf('note') : head.indexOf('notes');
+        if (col.Date >= 0 && col.Amount >= 0 && col.Category >= 0 && col.Type >= 0) return { sheet: names[i], rows: rows, head: h, col: col };
+      }
+    }
+    return null;
+  }
+  function planImport(X, wb) {
+    var t = findTable(X, wb);
+    if (!t) return { error: 'No sheet with Date, Type, Category and Amount columns was found. Start from the template.' };
+    var byName = {};
+    TYPES.forEach(function (ty) { byName[ty] = {}; Core.liveCats(data, ty).forEach(function (c) { byName[ty][c.name.trim().toLowerCase()] = c.id; }); });
+    var byId = {}; data.tx.forEach(function (x) { byId[x.id] = x; });
+    var seen = {}, plan = { rows: [], errors: [], missing: {}, counts: { add: 0, update: 0, del: 0, same: 0, again: 0, empty: 0 } };
+    function cell(r, k) { return t.col[k] >= 0 ? r[t.col[k]] : ''; }
+
+    for (var i = t.head + 1; i < t.rows.length; i++) {
+      var r = t.rows[i], line = i + 1;
+      var raw = { d: cell(r, 'Date'), ty: cell(r, 'Type'), c: cell(r, 'Category'), a: cell(r, 'Amount'), n: cell(r, 'Details'), id: String(cell(r, 'ID') || '').trim(), del: yes(cell(r, 'Delete')) };
+      if (![raw.d, raw.ty, raw.c, raw.a, raw.n, raw.id].some(function (v) { return String(v).trim() !== ''; })) { plan.counts.empty++; continue; }
+      if (raw.del) {
+        if (!raw.id || !byId[raw.id]) { plan.errors.push('Row ' + line + ': Delete is set but the row has no ID from this app, so there is nothing to delete.'); continue; }
+        if (byId[raw.id].del) { plan.counts.same++; continue; }
+        plan.rows.push({ op: 'del', id: raw.id }); plan.counts.del++; continue;
+      }
+      var d = parseDate(raw.d), ty = parseType(raw.ty), a = Core.parseAmount(raw.a), cname = String(raw.c).trim(), problems = [];
+      if (!d) problems.push(raw.d === '' ? 'date is empty' : 'date "' + raw.d + '" is not recognised');
+      if (!ty) problems.push(raw.ty === '' ? 'type is empty' : 'type "' + raw.ty + '" should be Income, Expenses or Savings');
+      if (a == null) problems.push(raw.a === '' ? 'amount is empty' : 'amount "' + raw.a + '" is not a number');
+      if (!cname) problems.push('category is empty');
+      if (problems.length) { plan.errors.push('Row ' + line + ': ' + problems.join(', ') + '.'); continue; }
+      var cid = byName[ty][cname.toLowerCase()];
+      if (!cid) { plan.missing[ty + '|' + cname.toLowerCase()] = { ty: ty, name: cname, n: (plan.missing[ty + '|' + cname.toLowerCase()] || { n: 0 }).n + 1 }; }
+      var note = String(raw.n == null ? '' : raw.n).trim();
+      var rec = { d: d, ty: ty, cname: cname, cid: cid, a: a, n: note, line: line };
+      if (raw.id && byId[raw.id]) {
+        var x = byId[raw.id];
+        if (!x.del && x.d === d && x.ty === ty && x.c === cid && x.a === a && (x.n || '') === note) { plan.counts.same++; continue; }
+        rec.op = 'update'; rec.id = raw.id; plan.counts.update++;
+      } else {
+        var key = [d, ty, cname.toLowerCase(), a, note.toLowerCase()].join('|');
+        seen[key] = (seen[key] || 0) + 1;
+        rec.id = raw.id || hashId(key + '|' + seen[key]);
+        if (byId[rec.id] && !byId[rec.id].del) { plan.counts.again++; continue; }
+        rec.op = 'add'; plan.counts.add++;
+      }
+      plan.rows.push(rec);
+    }
+    plan.sheet = t.sheet;
+    return plan;
+  }
+  function showImportPreview() {
+    var p = pendingImport, c = p.counts, miss = Object.keys(p.missing).map(function (k) { return p.missing[k]; });
+    var blocked = p.rows.filter(function (r) { return r.op !== 'del' && !r.cid; }).length;
+    var total = c.add + c.update + c.del;
+    var li = function (n, text) { return n ? '<li><b class="num">' + nf0.format(n) + '</b> ' + text + '</li>' : ''; };
+    var html = '<h2>Import ' + esc(p.fileName) + '</h2>' +
+      '<ul class="import-sum">' +
+      li(c.add, c.add === 1 ? 'new record' : 'new records') +
+      li(c.update, c.update === 1 ? 'record updated' : 'records updated') +
+      li(c.del, c.del === 1 ? 'record deleted' : 'records deleted') +
+      li(c.again, 'already imported earlier – skipped') +
+      li(c.same, 'unchanged – skipped') +
+      li(p.errors.length, p.errors.length === 1 ? 'row with a problem – skipped' : 'rows with problems – skipped') +
+      '</ul>';
+    if (miss.length) {
+      html += '<div class="import-box"><p><b>' + miss.length + (miss.length === 1 ? ' category is' : ' categories are') + ' not in your lists</b> (' + blocked + (blocked === 1 ? ' row uses' : ' rows use') + (miss.length === 1 ? ' it' : ' them') + '):</p><p class="muted">' +
+        miss.map(function (m) { return esc(m.name) + ' <span class="muted">(' + m.ty + ')</span>'; }).join(', ') + '</p>' +
+        '<label class="check"><input type="checkbox" id="imp-create" checked> Add these categories</label></div>';
+    }
+    if (p.errors.length) {
+      html += '<details class="import-box"' + (total ? '' : ' open') + '><summary>Show problems</summary><ul class="import-errors">' +
+        p.errors.slice(0, 50).map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') +
+        (p.errors.length > 50 ? '<li>…and ' + (p.errors.length - 50) + ' more</li>' : '') + '</ul><p class="muted">Fix these rows in the file and import it again – rows already imported are skipped.</p></details>';
+    }
+    html += '<div class="dialog-actions"><span class="spacer"></span><button class="btn" data-action="close-dialog">Cancel</button>' +
+      '<button class="btn primary" data-action="confirm-import"' + (total ? '' : ' disabled') + '>' + (total ? 'Import ' + nf0.format(total) + ' changes' : 'Nothing to import') + '</button></div>';
+    openMenu(html);
+  }
+  function confirmImport() {
+    var p = pendingImport; if (!p) return;
+    var create = !!($('imp-create') && $('imp-create').checked), now = Date.now(), made = {};
+    if (create) {
+      Object.keys(p.missing).forEach(function (k) {
+        var m = p.missing[k], list = data.categories[m.ty];
+        var maxO = list.reduce(function (mx, c) { return Math.max(mx, c.o || 0); }, -1);
+        var c = { id: Core.newId(), name: m.name, o: maxO + 1, t: now };
+        list.push(c); made[k] = c.id;
+      });
+    }
+    var byId = {}; data.tx.forEach(function (x) { byId[x.id] = x; });
+    var done = 0, skipped = 0;
+    p.rows.forEach(function (r) {
+      if (r.op === 'del') { byId[r.id].del = 1; byId[r.id].t = now; done++; return; }
+      var cid = r.cid || made[r.ty + '|' + r.cname.toLowerCase()];
+      if (!cid) { skipped++; return; }
+      if (r.op === 'update') {
+        var x = byId[r.id];
+        x.d = r.d; x.ty = r.ty; x.c = cid; x.a = r.a; x.t = now; delete x.del;
+        if (r.n) x.n = r.n; else delete x.n;
+      } else {
+        var rec = { id: r.id, d: r.d, ty: r.ty, c: cid, a: r.a, t: now };
+        if (r.n) rec.n = r.n;
+        if (byId[r.id]) { Object.assign(byId[r.id], rec); delete byId[r.id].del; } else data.tx.push(rec);
+      }
+      done++;
+    });
+    pendingImport = null;
+    $('menu-dialog').close();
+    if (!done) { toast('Nothing was imported'); return; }
+    commit();
+    toast('Imported ' + nf0.format(done) + ' changes' + (skipped ? ' – ' + skipped + ' rows skipped (unknown category)' : '') + (driveReady() && meta.connected ? '. Syncing to Drive…' : ''));
   }
 
   /* ───────────── Google Drive sync ─────────────
@@ -760,6 +1043,11 @@
     'starter': starter,
     'export-json': function () { download('budget-backup-' + today() + '.json', JSON.stringify(data), 'application/json'); },
     'export-csv': exportCsv,
+    'xl-template': downloadTemplate,
+    'xl-export': function () { exportExcel(Core.liveTx(data)); },
+    'xl-export-view': function () { exportExcel(lastList, 'filtered-' + today()); },
+    'xl-import': function () { loadXlsx().catch(function () { }); $('excel-file').value = ''; $('excel-file').click(); },
+    'confirm-import': confirmImport,
     'erase': function () {
       if (!confirm('Erase the copy of your budget stored in this browser?\n\nThe file in Google Drive is not touched. Anything not yet synced will be lost.')) return;
       [K.data, K.meta, K.token, K.ui].forEach(function (k) { localStorage.removeItem(k); });
@@ -811,6 +1099,7 @@
     if (el.dataset && CHANGES[el.dataset.change]) CHANGES[el.dataset.change](el);
     if (el.name === 'ty' && el.form === $('tx-form')) fillCatSelect(el.value, null);
     if (el.id === 'import-file' && el.files[0]) importFile(el.files[0]);
+    if (el.id === 'excel-file' && el.files[0]) readExcel(el.files[0]);
   });
   document.addEventListener('input', function (e) {
     var el = e.target;
