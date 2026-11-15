@@ -4,11 +4,11 @@
    ───────────────────────────────────────────────────────────────────────── */
 window.BUDGET_CONFIG = {
   // 1. OAuth client ID from Google Cloud Console (type: Web application)
-  GOOGLE_CLIENT_ID: 'PASTE_YOUR_CLIENT_ID.apps.googleusercontent.com',
+  GOOGLE_CLIENT_ID: '827079378126-nhht9udredqph6sqno2c0m464pc9m8ke.apps.googleusercontent.com',
 
   // 2. Link to the Google Drive folder that should hold the data file.
   //    (A link straight to an existing budget-data.json file also works.)
-  GOOGLE_DRIVE_LINK: 'https://drive.google.com/drive/folders/PASTE_YOUR_FOLDER_ID',
+  GOOGLE_DRIVE_LINK: 'https://drive.google.com/drive/folders/1WP9GSIiB214PCOdHZQbmDU8LgKbIa1pY?usp=drive_link',
 
   // Name of the data file kept in that folder.
   DATA_FILE_NAME: 'budget-data.json',
