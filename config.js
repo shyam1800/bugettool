@@ -8,7 +8,7 @@ window.BUDGET_CONFIG = {
 
   // 2. Link to the Google Drive folder that should hold the data file.
   //    (A link straight to an existing budget-data.json file also works.)
-  GOOGLE_DRIVE_LINK: 'https://drive.google.com/drive/folders/1WP9GSIiB214PCOdHZQbmDU8LgKbIa1pY?usp=drive_link',
+  GOOGLE_DRIVE_LINK: 'https://drive.google.com/file/d/1S_cEj7CN1T3W9aN-Qu_bFetimPzQxcEg/view?usp=drive_link',
 
   // Name of the data file kept in that folder.
   DATA_FILE_NAME: 'budget-data.json',
