@@ -8,9 +8,10 @@
   function emptyData() {
     return {
       schema: 1,
-      settings: { startYear: new Date().getFullYear(), savingRateMode: 'savings', currency: '₹', t: 0 },
+      settings: { startYear: new Date().getFullYear(), savingRateMode: 'savings', currency: '₹', fixedAuto: true, t: 0 },
       categories: { Income: [], Expenses: [], Savings: [] },
       budgets: {},
+      fixed: [],
       tx: []
     };
   }
@@ -118,6 +119,7 @@
     });
     Object.keys(rb).forEach(function (k) { if (!lb[k]) stats.bWins++; });
 
+    out.fixed = mergeList(local.fixed || [], remote.fixed || [], stats);
     out.tx = mergeList(local.tx, remote.tx, stats);
     return { data: out, localWins: stats.aWins, remoteWins: stats.bWins };
   }
@@ -296,10 +298,116 @@
     return ys;
   }
 
+
+  /* ---------- totals between two dates (inclusive, ISO strings) ---------- */
+  function totals(data, fromIso, toIso) {
+    var out = { Income: 0, Expenses: 0, Savings: 0, n: 0 };
+    liveTx(data).forEach(function (x) {
+      if (x.d < fromIso || x.d > toIso) return;
+      out[x.ty] += x.a; out.n++;
+    });
+    out.net = out.Income - out.Expenses - out.Savings;
+    out.rate = out.Income ? (data.settings.savingRateMode === 'notExpenses' ? (out.Income - out.Expenses) / out.Income : out.Savings / out.Income) : null;
+    return out;
+  }
+  function addMonths(y, m, k) { var t = y * 12 + (m - 1) + k; return { y: Math.floor(t / 12), m: (t % 12) + 1 }; }
+  function lastDay(y, m) { return new Date(y, m, 0).getDate(); }
+  function iso(y, m, d) { return y + '-' + String(m).padStart(2, '0') + '-' + String(Math.min(d, lastDay(y, m))).padStart(2, '0'); }
+
+  /* Snapshot cards: a month, a year (to date) and everything up to today, each with its comparison. */
+  function snapshots(data, year, period, todayIso) {
+    var tY = +todayIso.slice(0, 4), tM = +todayIso.slice(5, 7), tD = +todayIso.slice(8, 10);
+    var m = period === 'year' ? (year === tY ? tM : year < tY ? 12 : 1) : period;
+    var cutDay = year === tY && m === tM ? tD : 31;                      // compare like with like inside a running month
+    var pm = addMonths(year, m, -1);
+    var month = totals(data, iso(year, m, 1), iso(year, m, cutDay));
+    var prevMonth = totals(data, iso(pm.y, pm.m, 1), iso(pm.y, pm.m, cutDay));
+    var yEnd = year === tY ? todayIso : iso(year, 12, 31);
+    var yr = totals(data, iso(year, 1, 1), yEnd);
+    var prevYr = totals(data, iso(year - 1, 1, 1), (year - 1) + yEnd.slice(4));
+    var all = totals(data, '0000-01-01', todayIso);
+    var first = null;
+    liveTx(data).forEach(function (x) { if (x.d <= todayIso && (!first || x.d < first)) first = x.d; });
+    var months = first ? (tY - +first.slice(0, 4)) * 12 + tM - +first.slice(5, 7) + 1 : 0;
+    return {
+      month: { y: year, m: m, partial: cutDay < 31, cur: month, prev: prevMonth, prevLabel: { y: pm.y, m: pm.m } },
+      year: { y: year, toDate: year === tY, cur: yr, prev: prevYr },
+      all: { cur: all, first: first, months: months }
+    };
+  }
+
+  /* Per-category monthly sums for one type: { catId: { 'YYYY-MM': amount } } plus totals under '*'. */
+  function seriesByCat(data, ty) {
+    var out = { '*': {} };
+    liveTx(data).forEach(function (x) {
+      if (x.ty !== ty) return;
+      var k = x.d.slice(0, 7);
+      (out[x.c] = out[x.c] || {})[k] = (out[x.c][k] || 0) + x.a;
+      out['*'][k] = (out['*'][k] || 0) + x.a;
+    });
+    return out;
+  }
+
+  /* ---------- standard (fixed) records ----------
+     item: { id, name, ty, c, day, start:'YYYY-MM', end:'YYYY-MM'|null, autoFrom:'YYYY-MM', paused, rates:[{from:'YYYY-MM', a}], t, del } */
+  function rateFor(item, ym) {
+    var r = (item.rates || []).filter(function (x) { return x.from <= ym; })
+      .sort(function (a, b) { return a.from < b.from ? -1 : 1; });
+    return r.length ? r[r.length - 1].a : null;
+  }
+  function fixedId(item, ym) { return 'fx-' + item.id + '-' + ym; }
+  function liveFixed(data) { return (data.fixed || []).filter(function (f) { return !f.del; }); }
+  function inRange(item, ym) { return ym >= item.start && (!item.end || ym <= item.end); }
+  /* A record the person typed in themselves for the same thing that month (so we don't add it twice). */
+  function manualMatch(data, item, ym, amount) {
+    var nm = (item.name || '').trim().toLowerCase();
+    return liveTx(data).some(function (x) {
+      return !x.fx && x.ty === item.ty && x.c === item.c && x.d.slice(0, 7) === ym &&
+        (Math.abs(x.a - amount) < 0.005 || (nm && (x.n || '').toLowerCase().indexOf(nm) >= 0));
+    });
+  }
+  function txById(data) { var m = Object.create(null); data.tx.forEach(function (x) { m[x.id] = x; }); return m; }
+
+  /* Records that are due automatically up to today and not yet added. */
+  function fixedDue(data, todayIso) {
+    var byId = txById(data), out = [];
+    var tY = +todayIso.slice(0, 4), tM = +todayIso.slice(5, 7);
+    liveFixed(data).forEach(function (f) {
+      if (f.paused) return;
+      var from = f.autoFrom && f.autoFrom > f.start ? f.autoFrom : f.start;
+      var y = +from.slice(0, 4), m = +from.slice(5, 7), guard = 0;
+      while ((y < tY || (y === tY && m <= tM)) && guard++ < 240) {
+        var ym = y + '-' + String(m).padStart(2, '0'), d = iso(y, m, f.day || 1);
+        if (inRange(f, ym) && d <= todayIso) {
+          var a = rateFor(f, ym);
+          if (a && !byId[fixedId(f, ym)] && !manualMatch(data, f, ym, a)) out.push({ item: f, ym: ym, d: d, a: a });
+        }
+        var n = addMonths(y, m, 1); y = n.y; m = n.m;
+      }
+    });
+    return out;
+  }
+  /* "Apply now": every active standard for the month of dateIso, dated dateIso. */
+  function fixedForDate(data, dateIso) {
+    var ym = dateIso.slice(0, 7), byId = txById(data);
+    return liveFixed(data).filter(function (f) { return !f.paused && inRange(f, ym) && rateFor(f, ym); }).map(function (f) {
+      var a = rateFor(f, ym), ex = byId[fixedId(f, ym)];
+      var status = ex && !ex.del ? 'exists' : manualMatch(data, f, ym, a) ? 'manual' : 'add';
+      return { item: f, ym: ym, d: dateIso, a: a, status: status };
+    });
+  }
+  function fixedRecord(p, now) {
+    var rec = { id: fixedId(p.item, p.ym), d: p.d, ty: p.item.ty, c: p.item.c, a: p.a, fx: p.item.id, t: now };
+    if (p.item.name) rec.n = p.item.name;
+    return rec;
+  }
+
   var api = {
     TYPES: TYPES, MONTHS: MONTHS, emptyData: emptyData, newId: newId, parseAmount: parseAmount, merge: merge,
     liveCats: liveCats, catIndex: catIndex, liveTx: liveTx, ym: ym, budgetOf: budgetOf, isoToday: isoToday,
-    balances: balances, dashboard: dashboard, plan: plan, yearRange: yearRange, daysBetween: daysBetween
+    balances: balances, dashboard: dashboard, plan: plan, yearRange: yearRange, daysBetween: daysBetween,
+    totals: totals, snapshots: snapshots, seriesByCat: seriesByCat, addMonths: addMonths,
+    rateFor: rateFor, fixedId: fixedId, liveFixed: liveFixed, fixedDue: fixedDue, fixedForDate: fixedForDate, fixedRecord: fixedRecord
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.BudgetCore = api;

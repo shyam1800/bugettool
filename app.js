@@ -22,12 +22,15 @@
     TYPES.forEach(function (ty) { base.categories[ty] = Array.isArray((d.categories || {})[ty]) ? d.categories[ty] : []; });
     base.budgets = d.budgets && typeof d.budgets === 'object' ? d.budgets : {};
     base.tx = Array.isArray(d.tx) ? d.tx : [];
+    base.fixed = Array.isArray(d.fixed) ? d.fixed : [];
+    if (base.settings.fixedAuto == null) base.settings.fixedAuto = true;
     return base;
   }
 
   var data = normalise(readJSON(K.data, null));
   var meta = readJSON(K.meta, { dirty: false, fileId: null, sig: null, lastSync: 0, email: '', connected: false });
   var ui = Object.assign({
+    trType: 'Expenses', trMode: 'mom', trYear: 'current', trCat: '',
     dashYear: 'current', dashPeriod: 'current', show: { Income: true, Expenses: true, Savings: true, rem: true },
     planYear: null, txMonth: 'latest', txType: '', txCat: '', txQ: ''
   }, readJSON(K.ui, {}));
@@ -78,7 +81,7 @@
   }
 
   /* ───────────── routing & render ───────────── */
-  var TITLES = { dashboard: 'Dashboard', budget: 'Budget plan', transactions: 'Records', settings: 'Settings' };
+  var TITLES = { dashboard: 'Dashboard', trends: 'Trends', budget: 'Budget plan', transactions: 'Records', fixed: 'Standard records', settings: 'Settings' };
   function setRoute() {
     var r = location.hash.replace('#', '');
     route = TITLES[r] ? r : 'dashboard';
@@ -99,7 +102,7 @@
     Array.prototype.forEach.call(document.querySelectorAll('#nav a'), function (a) {
       if (a.dataset.route === route) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     });
-    var html = route === 'dashboard' ? viewDashboard() : route === 'budget' ? viewPlan() : route === 'transactions' ? viewRecords() : viewSettings();
+    var html = route === 'dashboard' ? viewDashboard() : route === 'trends' ? viewTrends() : route === 'budget' ? viewPlan() : route === 'transactions' ? viewRecords() : route === 'fixed' ? viewFixed() : viewSettings();
     $('view').innerHTML = html;
     if (route === 'budget') scrollPlanToMonth();
   }
@@ -144,6 +147,7 @@
         '<a class="btn small" href="#transactions">Review records</a></div>';
     }
 
+    out += snapshotPanel(Core.snapshots(data, s.year, s.period, t));
     out += chartPanel(d, s);
     out += figures(d);
     d.sections.forEach(function (sec) { out += typeBlock(sec); });
@@ -242,6 +246,314 @@
 
     return '<section class="panel type-block t-' + ty + '"><div class="type-head"><h2>' + ty + '</h2></div>' +
       '<div class="type-body"><div class="donut-wrap">' + donut + slices + '</div><div>' + table + '</div></div></section>';
+  }
+
+
+  /* ───────────── snapshot cards ───────────── */
+  function delta(cur, prev, goodWhenUp) {
+    if (!prev && !cur) return '<span class="dl">–</span>';
+    if (!prev) return '<span class="dl">new</span>';
+    var ch = (cur - prev) / Math.abs(prev), up = ch > 0.0005, down = ch < -0.0005;
+    var good = goodWhenUp ? up : down, bad = goodWhenUp ? down : up;
+    return '<span class="dl ' + (good ? 'good' : bad ? 'bad' : '') + '">' + (up ? '▲ ' : down ? '▼ ' : '') + Math.abs(ch * 100).toFixed(Math.abs(ch) < 0.1 ? 1 : 0) + '%</span>';
+  }
+  function snapRows(cur, prev, vsLabel, perMonth) {
+    var rows = [['Income', cur.Income, prev && prev.Income, true, 't-Income'], ['Expenses', cur.Expenses, prev && prev.Expenses, false, 't-Expenses'],
+      ['Savings', cur.Savings, prev && prev.Savings, true, 't-Savings'], ['Left over', cur.net, prev && prev.net, true, '']];
+    var html = rows.map(function (r) {
+      var cmp;
+      if (perMonth) cmp = '<td class="num muted">' + money(r[1] / perMonth, true) + '</td>';
+      else if (r[0] === 'Left over') {               // a % change of a balance that crosses zero means little – show the rupee change
+        var dd = r[1] - (r[2] || 0);
+        cmp = '<td><span class="dl ' + (dd > 0.5 ? 'good' : dd < -0.5 ? 'bad' : '') + '">' + (dd > 0.5 ? '▲ ' : dd < -0.5 ? '▼ ' : '') + money(Math.abs(dd), true) + '</span></td>';
+      } else cmp = '<td>' + delta(r[1], r[2], r[3]) + '</td>';
+      return '<tr class="' + r[4] + '"><th><i></i>' + r[0] + '</th><td class="num' + (r[0] === 'Left over' && r[1] < -0.005 ? ' neg' : '') + '">' + money(r[1], true) + '</td>' + cmp + '</tr>';
+    }).join('');
+    html += '<tr><th>Saving rate</th><td class="num">' + pct(cur.rate, 1) + '</td><td>' + (perMonth ? '' :
+      (cur.rate == null || prev.rate == null ? '<span class="dl">–</span>' : '<span class="dl ' + (cur.rate >= prev.rate ? 'good' : 'bad') + '">' + (cur.rate >= prev.rate ? '▲ ' : '▼ ') + Math.abs((cur.rate - prev.rate) * 100).toFixed(1) + ' pts</span>')) + '</td></tr>';
+    return '<table class="snap-t"><thead><tr><th></th><th></th><th>' + vsLabel + '</th></tr></thead><tbody>' + html + '</tbody></table>';
+  }
+  function snapshotPanel(s) {
+    var m = s.month, y = s.year, al = s.all;
+    var mLabel = MONTHS[m.m - 1] + ' ' + m.y + (m.partial ? ' so far' : '');
+    var pLabel = 'vs ' + MONTHS[m.prevLabel.m - 1].slice(0, 3) + (m.partial ? ' (same days)' : '');
+    return '<section class="snaps">' +
+      '<div class="panel snap"><h3>' + mLabel + '</h3>' + snapRows(m.cur, m.prev, pLabel) + '</div>' +
+      '<div class="panel snap"><h3>' + y.y + (y.toDate ? ' so far' : '') + '</h3>' + snapRows(y.cur, y.prev, 'vs ' + (y.y - 1) + (y.toDate ? ' same period' : '')) + '</div>' +
+      '<div class="panel snap"><h3>All time' + (al.first ? ' <small class="muted">since ' + fmtDate(al.first) + '</small>' : '') + '</h3>' + snapRows(al.cur, null, 'per month', Math.max(al.months, 1)) + '</div>' +
+      '</section>';
+  }
+
+  /* ───────────── trends (MoM / YoY per category) ───────────── */
+  function trendYear() { var tY = +today().slice(0, 4); return ui.trYear === 'current' ? tY : +ui.trYear; }
+  function viewTrends() {
+    if (!hasData()) return viewWelcome();
+    var ty = ui.trType, mode = ui.trMode, t = today(), tY = +t.slice(0, 4), tM = +t.slice(5, 7);
+    var S = Core.seriesByCat(data, ty), cats = Core.liveCats(data, ty), idx = Core.catIndex(data);
+    var goodUp = ty !== 'Expenses';
+    var years = Core.yearRange(data, t).filter(function (y) { return y <= tY; });
+    var Y = trendYear();
+    var ids = cats.map(function (c) { return c.id; });
+    Object.keys(S).forEach(function (k) { if (k !== '*' && ids.indexOf(k) < 0 && idx[k] && idx[k].type === ty) ids.push(k); });
+    var focus = ui.trCat && S[ui.trCat] ? ui.trCat : '*';
+    function v(id, ym) { return (S[id] || {})[ym] || 0; }
+    function ym(y, m) { return y + '-' + String(m).padStart(2, '0'); }
+    function nameOf(id) { return id === '*' ? 'All ' + ty.toLowerCase() : idx[id] ? idx[id].name : 'Unknown'; }
+
+    var out = '<div class="seg trend-type" role="radiogroup" aria-label="What to track">' + TYPES.map(function (x) {
+      return '<label class="t-' + x + '"><input type="radio" name="tr-type" data-change="tr-type" value="' + x + '"' + (x === ty ? ' checked' : '') + '><span>' + (x === 'Income' ? 'Income & salary' : x) + '</span></label>';
+    }).join('') + '</div>';
+    out += '<div class="period"><div class="seg seg-2" role="radiogroup" aria-label="Compare">' +
+      '<label><input type="radio" name="tr-mode" data-change="tr-mode" value="mom"' + (mode === 'mom' ? ' checked' : '') + '><span>Month over month</span></label>' +
+      '<label><input type="radio" name="tr-mode" data-change="tr-mode" value="yoy"' + (mode === 'yoy' ? ' checked' : '') + '><span>Year over year</span></label></div>' +
+      (mode === 'mom' ? '<select data-change="tr-year" aria-label="Year">' + years.slice().reverse().map(function (y) { return '<option value="' + y + '"' + (y === Y ? ' selected' : '') + '>' + y + '</option>'; }).join('') + '</select>' : '') +
+      '<select data-change="tr-cat" aria-label="Category"><option value="">All categories</option>' + ids.map(function (id) {
+        return '<option value="' + esc(id) + '"' + (id === focus ? ' selected' : '') + '>' + esc(nameOf(id)) + '</option>';
+      }).join('') + '</select></div>';
+
+    var chartPts, rowsHtml, head, insight = '';
+    if (mode === 'mom') {
+      var lastM = Y === tY ? tM : 12;
+      chartPts = [];
+      for (var m = 1; m <= 12; m++) chartPts.push({ label: MONTHS[m - 1].slice(0, 3), short: MONTHS[m - 1][0], v: v(focus, ym(Y, m)), prev: v(focus, ym(Y - 1, m)), future: Y === tY && m > tM, sel: Y === tY && m === tM });
+      // movers: last complete-ish month with data vs month before
+      var mm = lastM; while (mm > 1 && !v('*', ym(Y, mm))) mm--;
+      var pm = Core.addMonths(Y, mm, -1), movers = ids.map(function (id) { return { id: id, d: v(id, ym(Y, mm)) - v(id, ym(pm.y, pm.m)) }; })
+        .filter(function (x) { return Math.abs(x.d) >= 1; }).sort(function (a, b) { return Math.abs(b.d) - Math.abs(a.d); }).slice(0, 4);
+      var tot = v('*', ym(Y, mm)), ptot = v('*', ym(pm.y, pm.m));
+      insight = '<div class="panel insight t-' + ty + '"><p><b>' + MONTHS[mm - 1] + (Y === tY && mm === tM ? ' so far' : '') + ':</b> ' + money(tot, true) + ' ' + ty.toLowerCase() + ', ' +
+        (ptot ? delta(tot, ptot, goodUp) + ' vs ' + MONTHS[pm.m - 1] + ' (' + money(ptot, true) + ')' : 'nothing in ' + MONTHS[pm.m - 1] + ' to compare') + '.</p>' +
+        (movers.length ? '<ul class="movers">' + movers.map(function (x) {
+          var bad = goodUp ? x.d < 0 : x.d > 0;
+          return '<li><span>' + esc(nameOf(x.id)) + '</span><span class="num ' + (bad ? 'neg' : 'pos') + '">' + (x.d > 0 ? '+' : '−') + money(Math.abs(x.d), true) + '</span></li>';
+        }).join('') + '</ul>' : '') + '</div>';
+      head = '<tr><th class="name">Category</th>' + MONTHS.map(function (n, i) { return '<th class="v' + (Y === tY && i + 1 === tM ? ' cur' : '') + '">' + n.slice(0, 3) + '</th>'; }).join('') + '<th class="v sum">Total</th><th class="v sum">Avg / month</th></tr>';
+      var row = function (id, cls) {
+        var cells = '', total = 0, prevVal = v(id, ym(Y - 1, 12)), count = 0;
+        for (var m = 1; m <= 12; m++) {
+          var val = v(id, ym(Y, m)), fut = Y === tY && m > tM;
+          total += val; if (!fut) count++;
+          cells += '<td class="v' + (fut ? ' fut' : '') + '">' + (fut ? '' : (val ? '<span class="num">' + money(val, true) + '</span>' : '<span class="muted">–</span>') + (val || prevVal ? delta(val, prevVal, goodUp) : '')) + '</td>';
+          prevVal = val;
+        }
+        return '<tr class="' + (cls || '') + (id === focus ? ' focus' : '') + '"><th class="name"><button type="button" class="linkish" data-action="tr-focus" data-id="' + esc(id) + '">' + esc(nameOf(id)) + '</button></th>' + cells +
+          '<td class="v sum num">' + money(total, true) + '</td><td class="v sum num">' + money(total / Math.max(count, 1), true) + '</td></tr>';
+      };
+      var active = ids.filter(function (id) { for (var m = 1; m <= 12; m++) if (v(id, ym(Y, m)) || v(id, ym(Y - 1, m))) return true; return false; })
+        .sort(function (p, q) { var sp = 0, sq = 0; for (var m = 1; m <= 12; m++) { sp += v(p, ym(Y, m)); sq += v(q, ym(Y, m)); } return sq - sp; });
+      rowsHtml = row('*', 'tot') + active.map(function (id) { return row(id); }).join('');
+    } else {
+      chartPts = years.map(function (y) { return { label: String(y) + (y === tY ? ' so far' : ''), short: "'" + String(y).slice(2), v: sumYear(focus, y, 12), prev: y === tY ? sumYear(focus, y - 1, tM, true) : null, sel: y === tY }; });
+      head = '<tr><th class="name">Category</th>' + years.map(function (y) { return '<th class="v' + (y === tY ? ' cur' : '') + '">' + y + (y === tY ? ' so far' : '') + '</th>'; }).join('') +
+        '<th class="v sum">' + (tY - 1) + ' same period</th><th class="v sum">Change</th></tr>';
+      var rowY = function (id, cls) {
+        var cells = '', prev = null;
+        years.forEach(function (y) {
+          var val = sumYear(id, y, 12);
+          cells += '<td class="v">' + (val ? '<span class="num">' + money(val, true) + '</span>' : '<span class="muted">–</span>') + (y === tY || prev == null || (!val && !prev) ? '' : delta(val, prev, goodUp)) + '</td>';
+          prev = val;
+        });
+        var cur = sumYear(id, tY, 12), same = sumYear(id, tY - 1, tM, true);
+        return '<tr class="' + (cls || '') + (id === focus ? ' focus' : '') + '"><th class="name"><button type="button" class="linkish" data-action="tr-focus" data-id="' + esc(id) + '">' + esc(nameOf(id)) + '</button></th>' + cells +
+          '<td class="v sum num">' + money(same, true) + '</td><td class="v sum">' + (cur || same ? delta(cur, same, goodUp) : '–') + '</td></tr>';
+      };
+      var activeY = ids.filter(function (id) { return years.some(function (y) { return sumYear(id, y, 12); }); })
+        .sort(function (p, q) { return sumYear(q, tY, 12) + sumYear(q, tY - 1, 12) - sumYear(p, tY, 12) - sumYear(p, tY - 1, 12); });
+      rowsHtml = rowY('*', 'tot') + activeY.map(function (id) { return rowY(id); }).join('');
+      var c = sumYear('*', tY, 12), p = sumYear('*', tY - 1, tM, true);
+      insight = '<div class="panel insight t-' + ty + '"><p><b>' + tY + ' so far:</b> ' + money(c, true) + ' ' + ty.toLowerCase() + ', ' + (p ? delta(c, p, goodUp) + ' vs the same period of ' + (tY - 1) + ' (' + money(p, true) + ')' : 'nothing to compare in ' + (tY - 1)) + '.</p></div>';
+    }
+    function sumYear(id, y, upToM, cutToday) {
+      var s = 0;
+      for (var m = 1; m <= upToM; m++) {
+        if (cutToday && m === upToM) { // same month: only up to today's day
+          var day = +t.slice(8, 10);
+          Core.liveTx(data).forEach(function (x) { if (x.ty === ty && (id === '*' || x.c === id) && x.d.slice(0, 7) === ym(y, m) && +x.d.slice(8, 10) <= day) s += x.a; });
+        } else s += v(id, ym(y, m));
+      }
+      return s;
+    }
+    out += insight + trendChart(chartPts, ty, mode, nameOf(focus), Y);
+    out += '<div class="grid-wrap t-' + ty + '"><table class="plan trend"><thead>' + head + '</thead><tbody>' + rowsHtml + '</tbody></table></div>' +
+      '<p class="muted small-note">Each figure shows its change against the ' + (mode === 'mom' ? 'previous month' : 'previous year') + '. ' +
+      (ty === 'Expenses' ? 'For expenses, a rise is shown in pink and a fall in green.' : 'A rise is shown in green and a fall in pink.') + ' Tap a category to chart it.</p>';
+    return out;
+  }
+  function trendChart(pts, ty, mode, title, Y) {
+    var max = 0; pts.forEach(function (p) { max = Math.max(max, p.v, p.prev || 0); });
+    var top = niceMax(max), h = function (x) { return (top ? x / top * 100 : 0).toFixed(2) + '%'; };
+    var grid = '';
+    for (var g = 0; g <= 4; g++) grid += '<div style="top:' + (100 - g * 25) + '%"><span>' + (g === 0 ? '0' : esc(nfc.format(top * g / 4))) + '</span></div>';
+    var cols = pts.map(function (p) {
+      return '<div class="mcol tcol' + (p.future ? ' dim' : '') + (p.sel ? ' today' : '') + '" role="img" aria-label="' + esc(p.label + ': ' + money(p.v, true) + (p.prev != null ? ', comparison ' + money(p.prev, true) : '')) + '">' +
+        '<span class="bars"><span class="bar t-' + ty + '">' + (p.prev ? '<i class="ghost" style="bottom:' + h(p.prev) + '"></i>' : '') + '<i class="seg in" style="height:' + h(p.v) + '"></i></span></span>' +
+        '<span class="ml"><span><span class="short">' + esc(p.short) + '</span><span class="long">' + esc(p.label.replace(' so far', '')) + '</span></span></span></div>';
+    }).join('');
+    return '<section class="panel tvb t-' + ty + '"><div class="tvb-head"><h2>' + esc(title) + (mode === 'mom' ? ', ' + Y : ', by year') + '</h2><div class="legend">' +
+      '<label style="cursor:default"><span class="sw" style="background:var(--cb)"></span>' + (mode === 'mom' ? Y : 'Full year') + '</label>' +
+      '<label style="cursor:default"><span class="sw ghost-sw"></span>' + (mode === 'mom' ? 'Same month ' + (Y - 1) : 'Last year, same period') + '</label></div></div>' +
+      '<div class="chart"><div class="grid">' + grid + '</div>' + cols + '</div></section>';
+  }
+
+  /* ───────────── standard (fixed) records ───────────── */
+  function curYm() { return today().slice(0, 7); }
+  function ymLabel(ym) { return MONTHS[+ym.slice(5) - 1].slice(0, 3) + ' ' + ym.slice(0, 4); }
+  function ordinal(n) { return n + (n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd' : n % 10 === 3 && n !== 13 ? 'rd' : 'th'); }
+  function applyDueFixed(silent) {
+    if (!data.settings.fixedAuto) return 0;
+    var due = Core.fixedDue(data, today());
+    if (!due.length) return 0;
+    var now = Date.now();
+    due.forEach(function (p) { data.tx.push(Core.fixedRecord(p, now)); });
+    commit();
+    if (!silent) toast('Added ' + due.length + ' standard ' + (due.length === 1 ? 'record' : 'records'));
+    return due.length;
+  }
+  function viewFixed() {
+    if (!hasData()) return viewWelcome();
+    var list = Core.liveFixed(data), idx = Core.catIndex(data), t = today(), ym = curYm(), byId = {};
+    data.tx.forEach(function (x) { byId[x.id] = x; });
+    var out = '<section class="panel"><div class="form-row"><div class="lab"><b>Add standard records automatically</b><small>On each one’s day of the month, the record is added for you, using the amount in effect that month. Changing an amount never changes records already added.</small></div>' +
+      '<label class="switch"><input type="checkbox" data-change="fixed-auto"' + (data.settings.fixedAuto ? ' checked' : '') + '><span></span><b class="sr">Automatic</b></label></div>' +
+      '<div class="form-row"><div class="lab"><b>Add standard records now</b><small>Adds every active standard record for the month of this date, dated on this date. Ones already added that month are skipped.</small></div>' +
+      '<div class="row"><input type="date" id="fx-apply-date" value="' + t + '" aria-label="Date to add records on"><button class="btn primary" data-action="fx-apply">Apply now</button></div></div></section>';
+    out += '<div class="row" style="margin:16px 0 4px"><h2 style="flex:1">Your standard records</h2><button class="btn primary" data-action="fx-new">Add standard record</button></div>';
+    if (!list.length) return out + '<div class="empty panel"><p>No standard records yet. Add things that repeat every month – salary, rent, EMIs, chitti, SIPs, subscriptions.</p></div>';
+    TYPES.forEach(function (ty) {
+      var items = list.filter(function (f) { return f.ty === ty; }).sort(function (p, q) { return (p.day || 1) - (q.day || 1); });
+      if (!items.length) return;
+      var monthTotal = items.reduce(function (s, f) { return s + (!f.paused && (!f.end || f.end >= ym) && f.start <= ym ? Core.rateFor(f, ym) || 0 : 0); }, 0);
+      out += '<section class="panel fx-group t-' + ty + '"><div class="type-head"><h2>' + ty + '</h2><span class="muted num">' + money(monthTotal, true) + ' a month</span></div>';
+      items.forEach(function (f) {
+        var a = Core.rateFor(f, ym), next = (f.rates || []).filter(function (r) { return r.from > ym; }).sort(function (p, q) { return p.from < q.from ? -1 : 1; })[0];
+        var rec = byId[Core.fixedId(f, ym)], dueDay = Math.min(f.day || 1, new Date(+ym.slice(0, 4), +ym.slice(5), 0).getDate());
+        var status = f.paused ? 'Paused' : f.end && f.end < ym ? 'Ended ' + ymLabel(f.end) : f.start > ym ? 'Starts ' + ymLabel(f.start)
+          : rec && !rec.del ? '✓ Added for ' + MONTHS[+ym.slice(5) - 1].slice(0, 3)
+            : Core.fixedForDate(data, t).some(function (p) { return p.item.id === f.id && p.status === 'manual'; }) ? '✓ Already recorded this month'
+              : +t.slice(8) >= dueDay ? 'Due – not added yet' : 'Due ' + dueDay + ' ' + MONTHS[+ym.slice(5) - 1].slice(0, 3);
+        out += '<div class="fx-item' + (f.paused ? ' paused' : '') + '"><div class="fx-main"><b>' + esc(f.name || (idx[f.c] ? idx[f.c].name : '')) + '</b>' +
+          '<small>' + esc(idx[f.c] ? idx[f.c].name : 'Unknown category') + ' · ' + ordinal(f.day || 1) + ' of every month · from ' + ymLabel(f.start) + (f.end ? ' to ' + ymLabel(f.end) : '') + '</small>' +
+          '<small class="fx-status">' + status + (next ? ' · changes to ' + money(next.a, true) + ' from ' + ymLabel(next.from) : '') + '</small></div>' +
+          '<div class="fx-amt num">' + (a == null ? '<span class="muted">–</span>' : money(a)) + '</div>' +
+          '<div class="fx-actions"><button class="btn small" data-action="fx-rate" data-id="' + esc(f.id) + '">Change amount</button>' +
+          '<button class="btn small" data-action="fx-edit" data-id="' + esc(f.id) + '">Edit</button></div></div>';
+      });
+      out += '</section>';
+    });
+    return out;
+  }
+  function fixedById(id) { return (data.fixed || []).filter(function (f) { return f.id === id; })[0]; }
+  function catOptions(ty, sel) {
+    return Core.liveCats(data, ty).map(function (c) { return '<option value="' + esc(c.id) + '"' + (c.id === sel ? ' selected' : '') + '>' + esc(c.name) + '</option>'; }).join('');
+  }
+  function fixedForm(f) {
+    var isNew = !f; f = f || { ty: 'Expenses', day: 1, start: curYm(), rates: [] };
+    var days = ''; for (var d = 1; d <= 31; d++) days += '<option value="' + d + '"' + (d === (f.day || 1) ? ' selected' : '') + '>' + ordinal(d) + (d >= 29 ? ' (or last day)' : '') + '</option>';
+    openMenu('<form id="fx-form" class="fx-form" novalidate><h2>' + (isNew ? 'Add standard record' : 'Edit standard record') + '</h2>' +
+      '<div class="seg" role="radiogroup" aria-label="Type">' + TYPES.map(function (ty) { return '<label><input type="radio" name="fty" value="' + ty + '"' + (ty === f.ty ? ' checked' : '') + '><span>' + ty + '</span></label>'; }).join('') + '</div>' +
+      '<label class="field"><span>Name</span><input id="fx-name" type="text" value="' + esc(f.name || '') + '" placeholder="e.g. Salary, Gold loan EMI, Netflix" autocomplete="off"><small class="hint">Saved as the record’s details.</small></label>' +
+      '<label class="field"><span>Category</span><select id="fx-cat">' + catOptions(f.ty, f.c) + '</select></label>' +
+      (isNew ? '<label class="field"><span>Amount each month</span><input id="fx-amt" type="text" inputmode="decimal" autocomplete="off" placeholder="0"></label>' : '') +
+      '<label class="field"><span>Day of the month</span><select id="fx-day">' + days + '</select></label>' +
+      '<div class="two"><label class="field"><span>Starts</span><input id="fx-start" type="month" value="' + esc(f.start) + '"></label>' +
+      '<label class="field"><span>Ends (optional)</span><input id="fx-end" type="month" value="' + esc(f.end || '') + '"></label></div>' +
+      (isNew ? '<p class="hint">Automatic adding begins from the later of the start month and this month. To fill earlier months, use Apply now with a date in that month.</p>' :
+        '<label class="check"><input type="checkbox" id="fx-paused"' + (f.paused ? ' checked' : '') + '> Paused – don’t add new records</label>') +
+      '<p id="fx-error" class="error" hidden></p>' +
+      '<div class="dialog-actions">' + (isNew ? '' : '<button type="button" class="btn danger-text" data-action="fx-delete" data-id="' + esc(f.id) + '">Delete</button>') +
+      '<span class="spacer"></span><button type="button" class="btn" data-action="close-dialog">Cancel</button>' +
+      '<button type="button" class="btn primary" data-action="fx-save" data-id="' + esc(f.id || '') + '">' + (isNew ? 'Add standard record' : 'Save changes') + '</button></div></form>');
+  }
+  function fixedSave(id) {
+    var f = id ? fixedById(id) : null, err = function (m) { $('fx-error').textContent = m; $('fx-error').hidden = false; };
+    var ty = document.querySelector('#fx-form input[name="fty"]:checked').value, c = $('fx-cat').value, name = $('fx-name').value.trim();
+    var start = $('fx-start').value, end = $('fx-end').value || null, day = +$('fx-day').value;
+    if (!c) return err('Pick a category.');
+    if (!/^\d{4}-\d{2}$/.test(start)) return err('Pick a start month.');
+    if (end && end < start) return err('The end month is before the start month.');
+    var now = Date.now();
+    if (!f) {
+      var a = Core.parseAmount($('fx-amt').value);
+      if (a == null || a <= 0) return err('Enter the monthly amount.');
+      var cy = curYm();
+      data.fixed = data.fixed || [];
+      data.fixed.push({ id: Core.newId(), name: name, ty: ty, c: c, day: day, start: start, end: end, autoFrom: start > cy ? start : cy, paused: false, rates: [{ from: start, a: a }], t: now });
+    } else {
+      f.name = name; f.ty = ty; f.c = c; f.day = day; f.end = end; f.paused = !!($('fx-paused') && $('fx-paused').checked); f.t = now;
+      if (start !== f.start) {
+        f.start = start;
+        var rs = (f.rates || []).sort(function (p, q) { return p.from < q.from ? -1 : 1; });
+        if (rs.length && rs[0].from > start) rs[0].from = start;      // keep an amount in effect from the new start
+      }
+    }
+    $('menu-dialog').close();
+    commit();
+    var n = applyDueFixed(true);
+    toast((f ? 'Saved' : 'Standard record added') + (n ? ' – ' + n + ' record' + (n === 1 ? '' : 's') + ' added for this month' : ''));
+  }
+  function rateForm(id) {
+    var f = fixedById(id), ym = curYm(), a = Core.rateFor(f, ym);
+    var hist = (f.rates || []).slice().sort(function (p, q) { return p.from < q.from ? 1 : -1; });
+    openMenu('<form class="fx-form" novalidate><h2>Change amount – ' + esc(f.name || 'standard record') + '</h2>' +
+      '<p class="muted">Records already added keep their amounts. The new amount is used from the month you pick.</p>' +
+      '<label class="field"><span>New amount</span><input id="rt-amt" type="text" inputmode="decimal" autocomplete="off" value="' + (a == null ? '' : a) + '"></label>' +
+      '<label class="field"><span>From month</span><input id="rt-from" type="month" value="' + ym + '"></label>' +
+      '<label class="check" id="rt-upd-wrap"><input type="checkbox" id="rt-upd"> Also update records already added from that month on</label>' +
+      '<details class="quiet"' + (hist.length > 1 ? ' open' : '') + '><summary>Amount history</summary><ul class="rate-hist">' + hist.map(function (r) {
+        return '<li><span>From ' + ymLabel(r.from) + '</span><span class="num">' + money(r.a) + '</span>' + (hist.length > 1 ? '<button type="button" class="icon-btn" aria-label="Remove this change" data-action="rt-del" data-id="' + esc(f.id) + '" data-from="' + r.from + '"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>' : '') + '</li>';
+      }).join('') + '</ul></details>' +
+      '<p id="rt-error" class="error" hidden></p>' +
+      '<div class="dialog-actions"><span class="spacer"></span><button type="button" class="btn" data-action="close-dialog">Cancel</button>' +
+      '<button type="button" class="btn primary" data-action="rt-save" data-id="' + esc(f.id) + '">Save new amount</button></div></form>');
+  }
+  function rateSave(id) {
+    var f = fixedById(id), a = Core.parseAmount($('rt-amt').value), from = $('rt-from').value;
+    var err = function (m) { $('rt-error').textContent = m; $('rt-error').hidden = false; };
+    if (a == null || a <= 0) return err('Enter the new amount.');
+    if (!/^\d{4}-\d{2}$/.test(from)) return err('Pick the month it starts from.');
+    f.rates = (f.rates || []).filter(function (r) { return r.from !== from; });
+    f.rates.push({ from: from, a: a });
+    if (from < f.start) f.start = from;
+    var now = Date.now(); f.t = now;
+    var upd = 0;
+    if ($('rt-upd').checked) {
+      data.tx.forEach(function (x) {
+        if (x.fx === f.id && !x.del && x.d.slice(0, 7) >= from) { var na = Core.rateFor(f, x.d.slice(0, 7)); if (na != null && na !== x.a) { x.a = na; x.t = now; upd++; } }
+      });
+    }
+    $('menu-dialog').close(); commit();
+    toast(money(a) + ' from ' + ymLabel(from) + (upd ? ' – ' + upd + ' record' + (upd === 1 ? '' : 's') + ' updated' : ''));
+  }
+  function applyNow() {
+    var d = $('fx-apply-date').value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) { toast('Pick a date'); return; }
+    var props = Core.fixedForDate(data, d), idx = Core.catIndex(data);
+    if (!props.length) { toast('No active standard records cover ' + ymLabel(d.slice(0, 7))); return; }
+    var add = props.filter(function (p) { return p.status === 'add'; });
+    var label = { add: 'Will be added', exists: 'Already added', manual: 'You already recorded it' };
+    openMenu('<h2>Add standard records on ' + fmtDate(d) + '</h2>' +
+      '<ul class="fx-preview">' + props.map(function (p) {
+        return '<li class="' + p.status + ' t-' + p.item.ty + '"><span><b>' + esc(p.item.name || (idx[p.item.c] || {}).name || '') + '</b><small>' + label[p.status] + '</small></span><span class="num">' + money(p.a) + '</span></li>';
+      }).join('') + '</ul>' +
+      (add.length < props.length ? '<label class="check"><input type="checkbox" id="fx-force"> Add the skipped ones as well</label>' : '') +
+      '<div class="dialog-actions"><span class="spacer"></span><button class="btn" data-action="close-dialog">Cancel</button>' +
+      '<button class="btn primary" data-action="fx-apply-confirm" data-d="' + d + '">Add ' + (add.length || '') + ' records</button></div>');
+  }
+  function applyConfirm(d) {
+    var force = !!($('fx-force') && $('fx-force').checked), now = Date.now(), byId = {}, n = 0;
+    data.tx.forEach(function (x) { byId[x.id] = x; });
+    Core.fixedForDate(data, d).forEach(function (p) {
+      if (p.status !== 'add' && !force) return;
+      var rec = Core.fixedRecord(p, now);
+      if (p.status === 'exists' || (byId[rec.id])) {
+        if (!force && byId[rec.id] && !byId[rec.id].del) return;
+        if (byId[rec.id] && byId[rec.id].del) { Object.assign(byId[rec.id], rec); delete byId[rec.id].del; n++; return; }
+        rec.id = rec.id + '-' + now.toString(36);                      // an extra one on purpose
+      }
+      data.tx.push(rec); n++;
+    });
+    $('menu-dialog').close();
+    if (n) { commit(); toast('Added ' + n + ' standard ' + (n === 1 ? 'record' : 'records')); } else toast('Nothing to add');
   }
 
   /* ───────────── budget plan ───────────── */
@@ -383,7 +695,7 @@
       }
       var c = idx[x.c], bad = !c || c.del || c.type !== x.ty;
       out += '<button type="button" class="tx t-' + x.ty + '" data-action="edit-tx" data-id="' + esc(x.id) + '"><span class="dot"></span>' +
-        '<span class="cat">' + esc(c ? c.name : 'Unknown category') + (bad ? '<span class="flag">not in your ' + esc(x.ty.toLowerCase()) + ' list</span>' : '') + '</span>' +
+        '<span class="cat">' + esc(c ? c.name : 'Unknown category') + (x.fx ? '<span class="tag">Standard</span>' : '') + (bad ? '<span class="flag">not in your ' + esc(x.ty.toLowerCase()) + ' list</span>' : '') + '</span>' +
         '<span class="amt">' + (x.ty === 'Income' ? '+' : '−') + money(x.a).replace('−', '') + '</span>' +
         (x.n ? '<span class="note">' + esc(x.n) + '</span>' : '') + '</button>';
     });
@@ -981,6 +1293,8 @@
           try { remote = text.trim() ? JSON.parse(text) : Core.emptyData(); } catch (e) { throw new Error('The file in Drive is not a budget file'); }
           var m = Core.merge(data, normalise(remote));
           if (m.remoteWins) { data = m.data; saveData(); requestRender(); }
+          var dueNow = data.settings.fixedAuto ? Core.fixedDue(data, today()) : [];
+          if (dueNow.length) { var nw = Date.now(); dueNow.forEach(function (p) { data.tx.push(Core.fixedRecord(p, nw)); }); saveData(); requestRender(); return true; }
           meta.sig = sig;
           return m.localWins > 0;
         });
@@ -1043,6 +1357,22 @@
     'starter': starter,
     'export-json': function () { download('budget-backup-' + today() + '.json', JSON.stringify(data), 'application/json'); },
     'export-csv': exportCsv,
+    'tr-focus': function (el) { ui.trCat = el.dataset.id === '*' ? '' : el.dataset.id; saveUi(); render(); },
+    'fx-new': function () { fixedForm(null); },
+    'fx-edit': function (el) { fixedForm(fixedById(el.dataset.id)); },
+    'fx-save': function (el) { fixedSave(el.dataset.id); },
+    'fx-delete': function (el) {
+      if (!confirm('Delete this standard record?\n\nRecords it already added stay in your data.')) return;
+      var f = fixedById(el.dataset.id); f.del = 1; f.t = Date.now(); $('menu-dialog').close(); commit(); toast('Standard record deleted');
+    },
+    'fx-rate': function (el) { rateForm(el.dataset.id); },
+    'rt-save': function (el) { rateSave(el.dataset.id); },
+    'rt-del': function (el) {
+      var f = fixedById(el.dataset.id); if ((f.rates || []).length < 2) return;
+      f.rates = f.rates.filter(function (r) { return r.from !== el.dataset.from; }); f.t = Date.now(); commit(false); pendingRender = true; rateForm(f.id);
+    },
+    'fx-apply': applyNow,
+    'fx-apply-confirm': function (el) { applyConfirm(el.dataset.d); },
     'xl-template': downloadTemplate,
     'xl-export': function () { exportExcel(Core.liveTx(data)); },
     'xl-export-view': function () { exportExcel(lastList, 'filtered-' + today()); },
@@ -1062,6 +1392,11 @@
     'sync-chip': syncChip
   };
   var CHANGES = {
+    'tr-type': function (el) { ui.trType = el.value; ui.trCat = ''; saveUi(); render(); },
+    'tr-mode': function (el) { ui.trMode = el.value; saveUi(); render(); },
+    'tr-year': function (el) { ui.trYear = el.value; saveUi(); render(); },
+    'tr-cat': function (el) { ui.trCat = el.value; saveUi(); render(); },
+    'fixed-auto': function (el) { data.settings.fixedAuto = el.checked; data.settings.t = Date.now(); commit(); if (el.checked) applyDueFixed(); },
     'dash-year': function (el) { ui.dashYear = el.value; saveUi(); render(); },
     'dash-period': function (el) { ui.dashPeriod = el.value; saveUi(); render(); },
     'show': function (el) { ui.show[el.dataset.k] = el.checked; saveUi(); render(); },
@@ -1098,6 +1433,7 @@
     var el = e.target;
     if (el.dataset && CHANGES[el.dataset.change]) CHANGES[el.dataset.change](el);
     if (el.name === 'ty' && el.form === $('tx-form')) fillCatSelect(el.value, null);
+    if (el.name === 'fty') $('fx-cat').innerHTML = catOptions(el.value, null);
     if (el.id === 'import-file' && el.files[0]) importFile(el.files[0]);
     if (el.id === 'excel-file' && el.files[0]) readExcel(el.files[0]);
   });
@@ -1143,6 +1479,7 @@
   window.addEventListener('offline', function () { setSync(driveReady() ? 'offline' : 'local'); });
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState !== 'visible') return;
+    applyDueFixed();
     if (!maybeSilentSignIn()) scheduleSync(300);
   });
   // Another tab of the app on the same device changed something.
@@ -1154,6 +1491,7 @@
   /* ───────────── start ───────────── */
   var auth = handleAuthReturn();
   setRoute();
+  applyDueFixed();
   if (auth && auth.error) toast(auth.error);
   if (!driveReady()) setSync('local');
   else if (!maybeSilentSignIn()) sync();

@@ -1,6 +1,6 @@
 /* Offline support: keeps a copy of the app files on the device.
    Bump VERSION whenever you change any app file so devices pick up the update. */
-const VERSION = 'budget-v10';
+const VERSION = 'budget-v11';
 const FILES = ['./', 'index.html', 'styles.css', 'core.js', 'app.js', 'config.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 

@@ -62,6 +62,21 @@ Install it: on iPhone/iPad, Chrome → Share → **Add to Home Screen**. On Mac,
   confirmation, the chip at the top right says "Sign in to sync" – one tap.
 - Google shows an "unverified app" notice the first time, because the OAuth client is your own. That is expected.
 
+## Trends and snapshots
+
+- **Dashboard** opens with three snapshot cards: the selected month (compared with the previous month, same number of days if the month is still running), the year so far (compared with the same period last year) and all time (with a per-month average).
+- **Trends** compares income & salary, expenses or savings per category, month over month (with the same month last year as a dashed marker) or year over year (this year so far against the same period last year). Tap a category to chart it.
+
+## Standard records
+
+The **Standard** section holds things that repeat every month – salary, rent, EMIs, chitti, SIPs, subscriptions.
+
+- Each has a type, category, name, amount, day of the month, start month and optional end month.
+- **Automatic:** when the switch is on, each one is added on its day of the month (the app checks when it opens). It is skipped if you already recorded the same thing that month yourself.
+- **Change amount:** pick the new amount and the month it starts from. Records already added keep their old amounts unless you tick “Also update records already added”.
+- **Apply now:** pick any date; every active standard record covering that month is added on that date. Ones already added are skipped. Use this to fill earlier months.
+- Records made this way show a “Standard” tag in Records and are normal records otherwise – edit or delete them as usual.
+
 ## Adding records in bulk with Excel
 
 Settings → **Add or edit records in Excel**:
